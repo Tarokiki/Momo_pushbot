@@ -26,7 +26,7 @@ def get_access_token():
     params = {
         "grant_type": "client_credential",
         "appid": WX_APPID,
-        "secret": WX_SECRET
+        "secret": WX_SECRET,
     }
     data = http_get_json(url, params)
     if "access_token" not in data:
@@ -48,20 +48,34 @@ def send_template(payload):
 def build_payload_debug():
     now_you = datetime.now(ZoneInfo(YOU_TZ)).strftime("%Y-%m-%d %H:%M:%S")
 
-    # ✅ 写死每个字段，专门用来确认模板字段名是否对得上
+    # 两套字段都塞进去：哪套匹配模板，哪套就会显示
+    data = {
+        # --- 你截图那套 ---
+        "time": {"value": f"TIME_OK {now_you}"},
+        "bf": {"value": "BF_OK AAA"},
+        "you": {"value": "YOU_OK BBB"},
+        "days": {"value": "DAYS_OK 123"},
+        "countdown": {"value": "COUNTDOWN_OK 456"},
+        "love": {"value": "LOVE_OK CCC"},
+
+        # --- 另一套常见模板字段（first/keyword/remark）---
+        "first": {"value": f"FIRST_OK {now_you}"},
+        "keyword1": {"value": "K1_OK AAA"},
+        "keyword2": {"value": "K2_OK BBB"},
+        "keyword3": {"value": "K3_OK 123"},
+        "keyword4": {"value": "K4_OK 456"},
+        "keyword5": {"value": "K5_OK CCC"},
+        "remark": {"value": "REMARK_OK ZZZ"},
+    }
+
     payload = {
         "touser": WX_OPENID,
         "template_id": WX_TEMPLATE_ID,
-        "data": {
-            "time": {"value": f"TIME_OK {now_you}"},
-            "bf": {"value": "BF_OK AAA"},
-            "you": {"value": "YOU_OK BBB"},
-            "days": {"value": "DAYS_OK 123"},
-            "countdown": {"value": "COUNTDOWN_OK 456"},
-            "love": {"value": "LOVE_OK CCC"}
-        }
+        "data": data,
     }
 
+    print("=== Template ID used ===")
+    print(WX_TEMPLATE_ID)
     print("=== Payload to send ===")
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     print("=======================")
@@ -70,7 +84,6 @@ def build_payload_debug():
 
 
 def main():
-    # 强制发一次
     payload = build_payload_debug()
     send_template(payload)
 
