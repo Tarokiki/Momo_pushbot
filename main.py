@@ -12,13 +12,12 @@ WX_OPENID = os.environ["WX_OPENID"]
 WX_TEMPLATE_ID = os.environ["WX_TEMPLATE_ID"]
 QWEATHER_KEY = os.environ["QWEATHER_KEY"]
 
-# 可选：GitHub Actions 里 env 写 FORCE_SEND: "1" 可强制发送
 FORCE_SEND = os.environ.get("FORCE_SEND", "0") == "1"
 
 
 # ====== 固定参数 ======
 YOU_TZ = "Asia/Tokyo"
-BF_TZ = "America/Chicago"  # St. Louis
+BF_TZ = "America/Chicago"
 
 YOU_CITY = "Tokyo,JP"
 BF_CITY = "St Louis,US"
@@ -42,29 +41,22 @@ LOVE_LINES = [
 ]
 
 
-# ====== 工具函数 ======
 def _short(text: str, n: int = 200) -> str:
-    text = (text or "").replace("\n", " ").strip()
-    return text[:n]
+    return (text or "").replace("\n", " ").strip()[:n]
 
 
+# ====== 天气 ======
 def get_weather(city: str) -> dict:
-    """
-    返回: {"text": "...", "temp_c": "...", "feels_c": "..."}
-    """
     geo_url = (
-        "https://geoapi.qweather.com/v2/city/lookup"
+        "https://devapi.qweather.com/v2/city/lookup"
         f"?location={city}&key={QWEATHER_KEY}"
     )
+
     r = requests.get(geo_url, timeout=15)
     if r.status_code != 200:
         raise RuntimeError(f"[QWeather GEO] HTTP {r.status_code}: {_short(r.text)}")
 
-    try:
-        geo = r.json()
-    except Exception:
-        raise RuntimeError(f"[QWeather GEO] Not JSON: {_short(r.text)}")
-
+    geo = r.json()
     if str(geo.get("code")) != "200" or not geo.get("location"):
         raise RuntimeError(f"[QWeather GEO] bad response: {geo}")
 
@@ -74,15 +66,12 @@ def get_weather(city: str) -> dict:
         "https://devapi.qweather.com/v7/weather/now"
         f"?location={location_id}&key={QWEATHER_KEY}"
     )
+
     r2 = requests.get(now_url, timeout=15)
     if r2.status_code != 200:
         raise RuntimeError(f"[QWeather NOW] HTTP {r2.status_code}: {_short(r2.text)}")
 
-    try:
-        w = r2.json()
-    except Exception:
-        raise RuntimeError(f"[QWeather NOW] Not JSON: {_short(r2.text)}")
-
+    w = r2.json()
     if str(w.get("code")) != "200":
         raise RuntimeError(f"[QWeather NOW] bad response: {w}")
 
@@ -94,6 +83,7 @@ def get_weather(city: str) -> dict:
     }
 
 
+# ====== 微信 ======
 def get_access_token() -> str:
     url = "https://api.weixin.qq.com/cgi-bin/token"
     params = {
@@ -101,77 +91,69 @@ def get_access_token() -> str:
         "appid": WX_APPID,
         "secret": WX_SECRET,
     }
+
     r = requests.get(url, params=params, timeout=15)
     data = r.json()
+
     if "access_token" not in data:
         raise RuntimeError(f"[WeChat token] failed: {data}")
+
     return data["access_token"]
 
 
-def send_template_message(access_token: str, payload: dict) -> dict:
+def send_template_message(token: str, payload: dict):
     url = "https://api.weixin.qq.com/cgi-bin/message/template/send"
-    r = requests.post(url, params={"access_token": access_token}, json=payload, timeout=15)
+    r = requests.post(url, params={"access_token": token}, json=payload, timeout=15)
     data = r.json()
-    # 成功通常 errcode=0
+
     if data.get("errcode") != 0:
         raise RuntimeError(f"[WeChat send] failed: {data}")
+
     return data
 
 
+# ====== 构建消息 ======
 def build_message() -> dict:
     now_you = datetime.now(ZoneInfo(YOU_TZ))
     now_bf = datetime.now(ZoneInfo(BF_TZ))
 
-    # 时间闸门：默认只在男友当地 10:00~10:04 发送
     if not FORCE_SEND:
         if not (now_bf.hour == 10 and 0 <= now_bf.minute < 5):
-            print(f"Skip: BF time is {now_bf.isoformat()} (only send at 10:00~10:04).")
+            print("Skip: not in send time window.")
             return {}
 
-    # 天气
     weather_you = get_weather(YOU_CITY)
     weather_bf = get_weather(BF_CITY)
 
-    # 天数计算
-    today_you = now_you.date()
-    days_together = (today_you - TOGETHER_DATE).days
-    days_to_meet = (NEXT_MEET_DATE - today_you).days
+    today = now_you.date()
+    days_together = (today - TOGETHER_DATE).days
+    days_to_meet = (NEXT_MEET_DATE - today).days
 
     love = random.choice(LOVE_LINES)
 
-    # 兼容性最强：first + keyword1~keyword5 + remark
     first = (
         f"{GREETING}\n"
         f"Tokyo {now_you.strftime('%Y-%m-%d %H:%M')} / "
         f"St. Louis {now_bf.strftime('%Y-%m-%d %H:%M')}"
     )
 
-    kw1 = "Today’s weather update ✨"
-    kw2 = f"Tokyo: {weather_you['text']} {weather_you['temp_c']}°C (feels {weather_you['feels_c']}°C)"
-    kw3 = f"St. Louis: {weather_bf['text']} {weather_bf['temp_c']}°C (feels {weather_bf['feels_c']}°C)"
-    kw4 = f"Together: {days_together} days (since 2024-12-06)"
-    kw5 = f"Next meet: {days_to_meet} days (2026-03-05)"
-
-    remark = love
-
     payload = {
         "touser": WX_OPENID,
         "template_id": WX_TEMPLATE_ID,
-        # 你也可以放一个 url（可选），比如你们的合照云盘链接之类
-        # "url": "https://example.com",
         "data": {
             "first": {"value": first},
-            "keyword1": {"value": kw1},
-            "keyword2": {"value": kw2},
-            "keyword3": {"value": kw3},
-            "keyword4": {"value": kw4},
-            "keyword5": {"value": kw5},
-            "remark": {"value": remark},
+            "keyword1": {"value": f"Tokyo: {weather_you['text']} {weather_you['temp_c']}°C"},
+            "keyword2": {"value": f"St. Louis: {weather_bf['text']} {weather_bf['temp_c']}°C"},
+            "keyword3": {"value": f"Together: {days_together} days"},
+            "keyword4": {"value": f"Next meet: {days_to_meet} days"},
+            "remark": {"value": love},
         },
     }
+
     return payload
 
 
+# ====== 主函数 ======
 def main():
     payload = build_message()
     if not payload:
