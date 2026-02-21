@@ -1,223 +1,277 @@
+# -*- coding: utf-8 -*-
 import os
-import re
+import sys
 import json
 import random
+import datetime as dt
 import requests
-from datetime import datetime, date
-from zoneinfo import ZoneInfo
 
-# ======================
-# GitHub Secrets (WeChat)
-# ======================
-WX_APPID = os.environ["WX_APPID"]
-WX_SECRET = os.environ["WX_SECRET"]
-WX_OPENID = os.environ["WX_OPENID"]
-WX_TEMPLATE_ID = os.environ["WX_TEMPLATE_ID"]
 
-FORCE_SEND = os.environ.get("FORCE_SEND", "0") == "1"
+# ---------------------------
+# Config (ENV)
+# ---------------------------
+WX_APPID = os.getenv("WX_APPID", "").strip()
+WX_SECRET = os.getenv("WX_SECRET", "").strip()
+WX_OPENID = os.getenv("WX_OPENID", "").strip()
+WX_TEMPLATE_ID = os.getenv("WX_TEMPLATE_ID", "").strip()
 
-# ======================
-# Config
-# ======================
-YOU_TZ = "Asia/Tokyo"
-BF_TZ = "America/Chicago"  # St. Louis
+# Cities (can be Chinese/Japanese/English, open-meteo geocoding supports many)
+YOU_CITY = os.getenv("YOU_CITY", "Tokyo").strip()
+BF_CITY = os.getenv("BF_CITY", "St. Louis").strip()
 
-YOU_CITY = "Tokyo"
-BF_CITY = "St. Louis"
+# Dates (YYYY-MM-DD). Optional; if empty -> still sends something readable.
+TOGETHER_DATE = os.getenv("TOGETHER_DATE", "").strip()     # e.g. 2024-01-01
+COUNTDOWN_DATE = os.getenv("COUNTDOWN_DATE", "").strip()   # e.g. 2026-12-31
 
-TOGETHER_DATE = date(2024, 12, 6)
-NEXT_MEET_DATE = date(2026, 3, 5)
+# For debugging
+DEBUG = os.getenv("DEBUG", "1").strip() == "1"
+
+# If FORCE_SEND=1 then skip time window checks (you already use it)
+FORCE_SEND = os.getenv("FORCE_SEND", "").strip() == "1"
+
 
 SWEET_LINES = [
-    "You're my favorite notification.",
-    "Being yours is my favorite thing.",
-    "You are my safest place in this world.",
-    "Loving you feels like home.",
-    "Forever isn't long enough with you.",
-    "Even ordinary days feel special with you.",
-    "I choose you—again and again.",
-    "You make my heart feel quiet and warm.",
-    "If you’re smiling, I’m okay.",
-    "I’m lucky that I get to love you.",
+    "If today feels heavy, lean on me. I’m right here.",
+    "I hope you eat something warm and take a tiny breath for us.",
+    "Even on ordinary days, you’re still my favorite place.",
+    "I’m cheering for you quietly, constantly, stubbornly.",
+    "Miss you is my daily routine, loving you is my default setting.",
+    "One day closer to seeing you—until then, I’ll hold you in my thoughts.",
+    "Whatever the weather says, my forecast is: you + me = home.",
+    "I love you in the small moments, the loud moments, and the in-between.",
+    "When you’re tired, remember: you don’t have to be strong alone.",
+    "Today, please be gentle with yourself—for me, too.",
 ]
 
-GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
-WEATHER_URL = "https://api.open-meteo.com/v1/forecast"
 
-
+# ---------------------------
+# Helpers
+# ---------------------------
 def _short(s: str, n: int = 220) -> str:
-    s = (s or "").strip().replace("\n", " ")
+    s = (s or "").replace("\n", "\\n")
     return s[:n] + ("..." if len(s) > n else "")
 
 
-def http_get_json(url: str, params: dict | None = None, timeout: int = 15) -> dict:
-    r = requests.get(url, params=params, timeout=timeout)
-    if r.status_code != 200:
-        raise RuntimeError(f"HTTP {r.status_code}: {_short(r.text)}")
-    try:
-        return r.json()
-    except Exception:
-        raise RuntimeError(f"Invalid JSON: {_short(r.text)}")
+def _require_env():
+    missing = [k for k, v in {
+        "WX_APPID": WX_APPID,
+        "WX_SECRET": WX_SECRET,
+        "WX_OPENID": WX_OPENID,
+        "WX_TEMPLATE_ID": WX_TEMPLATE_ID,
+    }.items() if not v]
+    if missing:
+        raise RuntimeError(f"Missing env: {', '.join(missing)}")
 
 
-def http_post_json(url: str, payload: dict, timeout: int = 15) -> dict:
-    r = requests.post(url, json=payload, timeout=timeout)
-    if r.status_code != 200:
-        raise RuntimeError(f"HTTP {r.status_code}: {_short(r.text)}")
-    return r.json()
-
-
-# ======================
-# Open-Meteo Weather
-# ======================
-def get_latlon(city: str) -> tuple[float, float]:
-    data = http_get_json(GEOCODE_URL, {"name": city, "count": 1, "language": "en", "format": "json"})
-    results = data.get("results") or []
-    if not results:
-        raise RuntimeError(f"Geocoding not found: {city}")
-    item = results[0]
-    return float(item["latitude"]), float(item["longitude"])
-
-
-def get_weather_line(city: str, tz: str) -> str:
-    lat, lon = get_latlon(city)
-    data = http_get_json(
-        WEATHER_URL,
-        {
-            "latitude": lat,
-            "longitude": lon,
-            "current_weather": "true",
-            "timezone": tz,
-        },
-    )
-    cw = data.get("current_weather")
-    if not cw:
-        raise RuntimeError(f"No current_weather for {city}")
-    temp = cw.get("temperature")
-    wind = cw.get("windspeed")
-    return f"{city}: {temp}°C (wind {wind} km/h)"
-
-
-# ======================
-# WeChat
-# ======================
 def get_access_token() -> str:
     url = "https://api.weixin.qq.com/cgi-bin/token"
-    params = {"grant_type": "client_credential", "appid": WX_APPID, "secret": WX_SECRET}
-    data = http_get_json(url, params=params)
-    token = data.get("access_token")
-    if not token:
-        raise RuntimeError(f"Failed to get access_token: {data}")
-    return token
+    params = {
+        "grant_type": "client_credential",
+        "appid": WX_APPID,
+        "secret": WX_SECRET,
+    }
+    r = requests.get(url, params=params, timeout=20)
+    data = r.json()
+    if "access_token" not in data:
+        raise RuntimeError(f"get_access_token failed: {_short(json.dumps(data, ensure_ascii=False))}")
+    return data["access_token"]
 
 
-def get_template_field_keys(token: str, template_id: str) -> list[str]:
+def geocode_city(city: str):
     """
-    从微信接口拉取“真实模板内容”，解析出 {{xxx.DATA}} 里的 xxx
+    open-meteo geocoding (no key)
+    https://open-meteo.com/en/docs/geocoding-api
     """
-    url = f"https://api.weixin.qq.com/cgi-bin/template/get_all_private_template?access_token={token}"
-    data = http_get_json(url)
-
-    if "template_list" not in data:
-        raise RuntimeError(f"Cannot get template list: {data}")
-
-    tpl = None
-    for t in data["template_list"]:
-        if t.get("template_id") == template_id:
-            tpl = t
-            break
-
-    if not tpl:
-        raise RuntimeError(
-            "Template ID not found in get_all_private_template. "
-            "Check WX_TEMPLATE_ID in GitHub Secrets."
-        )
-
-    content = tpl.get("content", "")
-    # 解析所有 {{xxx.DATA}}
-    keys = re.findall(r"\{\{(\w+)\.DATA\}\}", content)
-
-    # 去重但保序
-    seen = set()
-    uniq = []
-    for k in keys:
-        if k not in seen:
-            seen.add(k)
-            uniq.append(k)
-
-    print("=== Template content (from API) ===")
-    print(content)
-    print("=== Extracted keys ===")
-    print(uniq)
-
-    if not uniq:
-        raise RuntimeError("No {{xxx.DATA}} fields found in template content returned by API.")
-
-    return uniq
+    url = "https://geocoding-api.open-meteo.com/v1/search"
+    params = {"name": city, "count": 1, "language": "en", "format": "json"}
+    r = requests.get(url, params=params, timeout=20)
+    if r.status_code != 200:
+        return None
+    try:
+        j = r.json()
+    except Exception:
+        return None
+    results = j.get("results") or []
+    if not results:
+        return None
+    x = results[0]
+    return {
+        "name": x.get("name") or city,
+        "country": x.get("country") or "",
+        "lat": x.get("latitude"),
+        "lon": x.get("longitude"),
+        "timezone": x.get("timezone") or "auto",
+    }
 
 
-def send_template_message(token: str, payload: dict) -> dict:
-    url = f"https://api.weixin.qq.com/cgi-bin/message/template/send?access_token={token}"
-    resp = http_post_json(url, payload)
-    if resp.get("errcode") != 0:
-        raise RuntimeError(f"WeChat send failed: {resp}")
-    return resp
+def weather_code_to_text(code: int) -> str:
+    # Minimal mapping (enough for cute display)
+    m = {
+        0: "Clear",
+        1: "Mainly clear",
+        2: "Partly cloudy",
+        3: "Overcast",
+        45: "Fog",
+        48: "Rime fog",
+        51: "Light drizzle",
+        53: "Drizzle",
+        55: "Dense drizzle",
+        61: "Slight rain",
+        63: "Rain",
+        65: "Heavy rain",
+        71: "Slight snow",
+        73: "Snow",
+        75: "Heavy snow",
+        80: "Rain showers",
+        81: "Rain showers",
+        82: "Violent showers",
+        95: "Thunderstorm",
+    }
+    return m.get(code, f"Weather code {code}")
 
 
-# ======================
-# Build message
-# ======================
-def main():
-    now_you = datetime.now(ZoneInfo(YOU_TZ))
-    now_bf = datetime.now(ZoneInfo(BF_TZ))
+def get_weather(city: str) -> str:
+    """
+    Returns a short text, never empty.
+    """
+    try:
+        geo = geocode_city(city)
+        if not geo or geo["lat"] is None or geo["lon"] is None:
+            return f"{city}: N/A"
 
-    # 时间闸门：默认只在男友当地 10:00~10:04 发送
-    if not FORCE_SEND:
-        if not (now_bf.hour == 10 and now_bf.minute < 5):
-            print(f"Skip: BF time is {now_bf.strftime('%H:%M')} (need 10:00~10:04).")
-            return
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": geo["lat"],
+            "longitude": geo["lon"],
+            "current_weather": "true",
+            "timezone": "auto",
+        }
+        r = requests.get(url, params=params, timeout=20)
+        if r.status_code != 200:
+            return f"{geo['name']}: N/A"
+
+        j = r.json()
+        cw = j.get("current_weather") or {}
+        temp = cw.get("temperature")
+        wind = cw.get("windspeed")
+        code = cw.get("weathercode")
+
+        parts = []
+        label = geo["name"]
+        if geo.get("country"):
+            label = f"{label}, {geo['country']}"
+
+        if code is not None:
+            parts.append(weather_code_to_text(int(code)))
+        if temp is not None:
+            parts.append(f"{temp}°C")
+        if wind is not None:
+            parts.append(f"wind {wind} km/h")
+
+        if not parts:
+            return f"{label}: N/A"
+        return f"{label}: " + ", ".join(parts)
+
+    except Exception:
+        return f"{city}: N/A"
+
+
+def parse_date(s: str):
+    if not s:
+        return None
+    try:
+        return dt.datetime.strptime(s, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def days_between(start_date: dt.date, end_date: dt.date) -> int:
+    return (end_date - start_date).days
+
+
+def build_message() -> dict:
+    now = dt.datetime.now()
+    today = now.date()
+
+    you_weather = get_weather(YOU_CITY)
+    bf_weather = get_weather(BF_CITY)
+
+    together_date = parse_date(TOGETHER_DATE)
+    countdown_date = parse_date(COUNTDOWN_DATE)
+
+    if together_date:
+        together_days = days_between(together_date, today)
+        together_text = f"{together_days} days"
     else:
-        print("FORCE_SEND enabled, skip time check.")
+        together_text = "N/A"
 
-    # 生成内容
-    time_str = now_you.strftime("%Y-%m-%d %H:%M")
-    weather_you = get_weather_line(YOU_CITY, YOU_TZ)
-    weather_bf = get_weather_line(BF_CITY, BF_TZ)
+    if countdown_date:
+        cd = days_between(today, countdown_date)
+        countdown_text = f"{cd} days"
+    else:
+        countdown_text = "N/A"
 
-    days_together = (now_you.date() - TOGETHER_DATE).days
-    days_to_meet = (NEXT_MEET_DATE - now_you.date()).days
-    love = random.choice(SWEET_LINES)
+    love_line = random.choice(SWEET_LINES)
 
-    # 拿真实字段名（自动适配）
-    token = get_access_token()
-    keys = get_template_field_keys(token, WX_TEMPLATE_ID)
-
-    # 按顺序塞值：如果模板字段多于6个，多出来的字段填空字符串
-    values = [
-        time_str,                         # 1 时间
-        weather_you,                      # 2 your weather
-        weather_bf,                       # 3 my weather
-        str(days_together),               # 4 together days
-        str(days_to_meet),                # 5 countdown
-        love,                             # 6 love line
-    ]
-
-    data = {}
-    for i, k in enumerate(keys):
-        v = values[i] if i < len(values) else ""
-        data[k] = {"value": v}
+    # IMPORTANT: keys MUST match template placeholders exactly:
+    # time, bf, you, days, countdown, love
+    data = {
+        "time": {"value": now.strftime("%Y-%m-%d %H:%M")},
+        "bf": {"value": bf_weather},
+        "you": {"value": you_weather},
+        "days": {"value": together_text},
+        "countdown": {"value": countdown_text},
+        "love": {"value": love_line},
+    }
 
     payload = {
         "touser": WX_OPENID,
         "template_id": WX_TEMPLATE_ID,
         "data": data,
     }
+    return payload
 
-    print("=== Payload (final) ===")
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
-    result = send_template_message(token, payload)
-    print("Sent OK:", result)
+def send_template_message(payload: dict) -> dict:
+    token = get_access_token()
+    url = f"https://api.weixin.qq.com/cgi-bin/message/template/send?access_token={token}"
+    r = requests.post(url, json=payload, timeout=20)
+    try:
+        data = r.json()
+    except Exception:
+        raise RuntimeError(f"WeChat send non-json response: HTTP {r.status_code}: {_short(r.text)}")
+    return data
+
+
+def main():
+    _require_env()
+
+    if FORCE_SEND:
+        print("FORCE_SEND enabled, skip time check.")
+    else:
+        # If you want time gating later, add it here.
+        pass
+
+    payload = build_message()
+
+    if DEBUG:
+        print("=== Payload (final) ===")
+        safe = dict(payload)
+        safe["touser"] = "***"
+        safe["template_id"] = "***"
+        print(json.dumps(safe, ensure_ascii=False, indent=2))
+
+    resp = send_template_message(payload)
+
+    if DEBUG:
+        print("=== WeChat response ===")
+        print(json.dumps(resp, ensure_ascii=False, indent=2))
+
+    # WeChat success: errcode == 0
+    if resp.get("errcode") != 0:
+        raise RuntimeError(f"WeChat send failed: {_short(json.dumps(resp, ensure_ascii=False))}")
+
+    print("Send OK.")
 
 
 if __name__ == "__main__":
